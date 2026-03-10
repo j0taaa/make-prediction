@@ -17,6 +17,13 @@ docker compose up --build
 
 Open http://localhost:3000
 
+## PWA support
+
+The app now includes a web manifest and service worker so it can be installed as a Progressive Web App.
+
+- In Chromium-based browsers, use **Install app** from the address bar/menu.
+- The app shell and previously visited pages are cached for offline reuse.
+
 ## Checks
 
 ```bash
