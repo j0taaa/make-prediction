@@ -3,7 +3,7 @@
 import { FormEvent, useMemo, useState } from "react";
 
 type ProofPackage = {
-  version: "1.1";
+  version: "1.2";
   timestamp: string;
   hash: string;
   salt: string;
@@ -15,24 +15,19 @@ type ProofPackage = {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-const bytesToHex = (bytes: Uint8Array): string =>
-  Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-
-const hexToBytes = (hex: string): Uint8Array => {
-  if (hex.length % 2 !== 0) throw new Error("Invalid hex");
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < hex.length; i += 2) {
-    bytes[i / 2] = parseInt(hex.slice(i, i + 2), 16);
-  }
-  return bytes;
-};
-
 const toBase64 = (bytes: Uint8Array): string => {
   if (typeof window === "undefined") return "";
   const binary = String.fromCharCode(...bytes);
   return window.btoa(binary);
+};
+
+const toBase64Url = (bytes: Uint8Array): string =>
+  toBase64(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+
+const fromBase64UrlToBytes = (encoded: string): Uint8Array => {
+  const normalized = encoded.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+  return fromBase64ToBytes(padded);
 };
 
 const fromBase64ToBytes = (encoded: string): Uint8Array => {
@@ -41,13 +36,11 @@ const fromBase64ToBytes = (encoded: string): Uint8Array => {
   return Uint8Array.from(binary, (char) => char.charCodeAt(0));
 };
 
-const toBase64Text = (text: string): string => toBase64(encoder.encode(text));
-
 const fromBase64Text = (encoded: string): string => decoder.decode(fromBase64ToBytes(encoded));
 
 async function sha256(input: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", encoder.encode(input));
-  return bytesToHex(new Uint8Array(digest));
+  return toBase64Url(new Uint8Array(digest));
 }
 
 const toSafeBytes = (bytes: Uint8Array): Uint8Array => Uint8Array.from(bytes);
@@ -76,7 +69,7 @@ async function deriveEncryptionKey(passphrase: string, salt: Uint8Array): Promis
 
 async function makeProof(prediction: string, authKey: string): Promise<ProofPackage> {
   const timestamp = new Date().toISOString();
-  const salt = crypto.randomUUID();
+  const salt = toBase64Url(crypto.getRandomValues(new Uint8Array(16)));
   const keySalt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
 
@@ -93,25 +86,25 @@ async function makeProof(prediction: string, authKey: string): Promise<ProofPack
   const hash = await sha256(`${prediction}::${timestamp}::${salt}`);
 
   return {
-    version: "1.1",
+    version: "1.2",
     timestamp,
     hash,
     salt,
-    keySalt: bytesToHex(keySalt),
-    iv: bytesToHex(iv),
-    encryptedPrediction: toBase64(new Uint8Array(encrypted)),
+    keySalt: toBase64Url(keySalt),
+    iv: toBase64Url(iv),
+    encryptedPrediction: toBase64Url(new Uint8Array(encrypted)),
   };
 }
 
 async function decryptPrediction(token: ProofPackage, authKey: string): Promise<string> {
-  const decryptionKey = await deriveEncryptionKey(authKey, hexToBytes(token.keySalt));
+  const decryptionKey = await deriveEncryptionKey(authKey, fromBase64UrlToBytes(token.keySalt));
   const decrypted = await crypto.subtle.decrypt(
     {
       name: "AES-GCM",
-      iv: toSafeBytes(hexToBytes(token.iv)) as BufferSource,
+      iv: toSafeBytes(fromBase64UrlToBytes(token.iv)) as BufferSource,
     },
     decryptionKey,
-    toSafeBytes(fromBase64ToBytes(token.encryptedPrediction)) as BufferSource,
+    toSafeBytes(fromBase64UrlToBytes(token.encryptedPrediction)) as BufferSource,
   );
 
   return decoder.decode(decrypted);
@@ -124,7 +117,6 @@ export default function Home() {
   const [token, setToken] = useState("");
   const [status, setStatus] = useState("");
 
-  const [verifyPrediction, setVerifyPrediction] = useState("");
   const [verifyToken, setVerifyToken] = useState("");
   const [verifyKey, setVerifyKey] = useState("");
   const [recoveredPrediction, setRecoveredPrediction] = useState("");
@@ -145,8 +137,17 @@ export default function Home() {
 
     const newProof = await makeProof(prediction.trim(), authKey.trim());
     setProof(newProof);
-    setToken(toBase64Text(JSON.stringify(newProof)));
+    setToken(JSON.stringify(newProof));
     setStatus("Sealed. Keep your token and key.");
+  }
+
+  function parseToken(rawToken: string): ProofPackage {
+    const cleaned = rawToken.trim();
+    try {
+      return JSON.parse(cleaned) as ProofPackage;
+    } catch {
+      return JSON.parse(fromBase64Text(cleaned)) as ProofPackage;
+    }
   }
 
   async function verifyCommitment(event: FormEvent<HTMLFormElement>) {
@@ -159,7 +160,7 @@ export default function Home() {
     }
 
     try {
-      const parsed = JSON.parse(fromBase64Text(verifyToken.trim())) as ProofPackage;
+      const parsed = parseToken(verifyToken);
       if (!parsed.hash || !parsed.timestamp || !parsed.salt || !parsed.keySalt || !parsed.iv) {
         setVerifyResult("Invalid token.");
         return;
@@ -170,12 +171,6 @@ export default function Home() {
 
       if (recomputed !== parsed.hash) {
         setVerifyResult("❌ No match");
-        return;
-      }
-
-      if (verifyPrediction.trim() && verifyPrediction.trim() !== decryptedPrediction.trim()) {
-        setVerifyResult("❌ Key is valid, but typed prediction does not match the sealed text.");
-        setRecoveredPrediction(decryptedPrediction);
         return;
       }
 
@@ -257,13 +252,6 @@ export default function Home() {
                 onChange={(event) => setVerifyKey(event.target.value)}
                 className="w-full min-w-0 rounded-2xl border border-white/15 bg-black/40 p-4 text-sm outline-none ring-cyan-300 transition focus:ring-2"
                 placeholder="Authentication key"
-              />
-              <textarea
-                value={verifyPrediction}
-                onChange={(event) => setVerifyPrediction(event.target.value)}
-                rows={3}
-                className="w-full min-w-0 rounded-2xl border border-white/15 bg-black/40 p-4 text-sm outline-none ring-cyan-300 transition focus:ring-2"
-                placeholder="Original prediction (optional, for extra check)"
               />
               <textarea
                 value={verifyToken}
